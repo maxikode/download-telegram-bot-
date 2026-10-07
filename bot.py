@@ -5,6 +5,7 @@ import tempfile
 import threading
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse
 
 import yt_dlp
 from telegram import Update
@@ -19,6 +20,7 @@ from telegram.ext import (
 
 TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 PORT = int(os.environ.get("PORT", "10000"))
+
 
 START_TEXT = (
     "Привет! 👋\n\n"
@@ -56,9 +58,32 @@ def start_web_server():
         HealthHandler
     )
 
-    logger.info("HTTP server started on port %s", PORT)
+    logger.info(
+        "HTTP server started on port %s",
+        PORT
+    )
 
     server.serve_forever()
+
+
+def is_youtube_url(url: str) -> bool:
+    try:
+        hostname = urlparse(url).hostname
+
+        if not hostname:
+            return False
+
+        hostname = hostname.lower()
+
+        return (
+            hostname == "youtube.com"
+            or hostname.endswith(".youtube.com")
+            or hostname == "youtu.be"
+            or hostname.endswith(".youtu.be")
+        )
+
+    except Exception:
+        return False
 
 
 async def start(
@@ -66,29 +91,16 @@ async def start(
     context: ContextTypes.DEFAULT_TYPE
 ):
     if update.message:
-        await update.message.reply_text(START_TEXT)
-
-
-async def download_video(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-    if not update.message or not update.message.text:
-        return
-
-    url = update.message.text.strip()
-
-    if not url.startswith(("https://", "http://")):
         await update.message.reply_text(
-            "🔗 Отправь мне ссылку на видео."
+            START_TEXT
         )
-        return
 
-    status = await update.message.reply_text(
-        "⏳ Скачиваю видео...\n\n"
-        "Это может занять некоторое время."
-    )
 
+async def download_other_video(
+    update: Update,
+    url: str,
+    status
+):
     try:
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -102,16 +114,12 @@ async def download_video(
                 options = {
                     "outtmpl": output_template,
 
-                    # Лучшее доступное видео + лучшее аудио.
-                    # Если отдельные потоки недоступны,
-                    # используется готовый поток.
                     "format": (
                         "bv*[height<=1080]+ba/"
                         "b[height<=1080]/"
                         "bv*+ba/b"
                     ),
 
-                    # Объединяем видео и аудио в MP4.
                     "merge_output_format": "mp4",
 
                     "noplaylist": True,
@@ -127,18 +135,14 @@ async def download_video(
                     "fragment_retries": 3,
 
                     "concurrent_fragment_downloads": 4,
-
-                    # Помогает yt-dlp использовать
-                    # JavaScript challenge solving для YouTube.
-                    "remote_components": {
-                        "ejs": "github"
-                    },
                 }
 
                 with yt_dlp.YoutubeDL(options) as ydl:
                     ydl.download([url])
 
-            await asyncio.to_thread(download)
+            await asyncio.to_thread(
+                download
+            )
 
             files = [
                 path
@@ -148,38 +152,34 @@ async def download_video(
 
             if not files:
                 raise RuntimeError(
-                    "Видео не найдено после скачивания."
+                    "Видео не найдено"
                 )
 
-            # После объединения FFmpeg обычно создаёт MP4.
             mp4_files = [
                 path
                 for path in files
                 if path.suffix.lower() == ".mp4"
             ]
 
-            if mp4_files:
-                video_path = mp4_files[0]
-            else:
-                video_path = files[0]
+            video_path = (
+                mp4_files[0]
+                if mp4_files
+                else files[0]
+            )
 
             file_size = video_path.stat().st_size
 
-            # Оставляем небольшой запас относительно
-            # лимита Telegram Bot API.
             if file_size > 49 * 1024 * 1024:
 
                 await status.edit_text(
-                    "❌ Видео получилось слишком большим "
-                    "для отправки через Telegram.\n\n"
-                    "Попробуй видео меньшего размера."
+                    "❌ Видео слишком большое "
+                    "для отправки через Telegram."
                 )
 
                 return
 
             await status.edit_text(
-                "📤 Видео скачано!\n"
-                "Отправляю..."
+                "📤 Отправляю видео..."
             )
 
             with video_path.open("rb") as video:
@@ -204,20 +204,58 @@ async def download_video(
             error
         )
 
-        try:
+        await status.edit_text(
+            "❌ Не получилось скачать это видео.\n\n"
+            "Проверь ссылку и попробуй ещё раз."
+        )
 
-            await status.edit_text(
-                "❌ Не получилось скачать видео.\n\n"
-                "Возможные причины:\n"
-                "• ссылка недоступна;\n"
-                "• видео удалено или ограничено;\n"
-                "• сайт временно не поддерживается;\n"
-                "• видео слишком большое.\n\n"
-                "Попробуй другую публичную ссылку."
-            )
 
-        except Exception:
-            pass
+async def handle_link(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    if not update.message:
+        return
+
+    if not update.message.text:
+        return
+
+    url = update.message.text.strip()
+
+    if not url.startswith(
+        ("https://", "http://")
+    ):
+        await update.message.reply_text(
+            "🔗 Отправь ссылку на видео."
+        )
+        return
+
+    # Отдельная обработка YouTube.
+    if is_youtube_url(url):
+
+        await update.message.reply_text(
+            "▶️ Это ссылка YouTube.\n\n"
+            "Сейчас YouTube блокирует запросы "
+            "с серверов Render проверкой "
+            "«подтвердите, что вы не бот».\n\n"
+            "Поэтому я не буду запрашивать "
+            "твои личные cookies Google.\n\n"
+            "Попробуй пока ссылку на другой "
+            "поддерживаемый сервис."
+        )
+
+        return
+
+    status = await update.message.reply_text(
+        "⏳ Скачиваю видео..."
+    )
+
+    await download_other_video(
+        update,
+        url,
+        status
+    )
 
 
 async def error_handler(
@@ -238,8 +276,6 @@ def main():
             "BOT_TOKEN не найден в Environment Variables Render."
         )
 
-    # HTTP-сервер нужен Render,
-    # чтобы Web Service считался работающим.
     web_thread = threading.Thread(
         target=start_web_server,
         daemon=True
@@ -247,7 +283,6 @@ def main():
 
     web_thread.start()
 
-    # Создаём Telegram-приложение.
     app = (
         Application
         .builder()
@@ -255,7 +290,6 @@ def main():
         .build()
     )
 
-    # /start
     app.add_handler(
         CommandHandler(
             "start",
@@ -263,11 +297,10 @@ def main():
         )
     )
 
-    # Все сообщения с HTTP/HTTPS ссылками.
     app.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
-            download_video
+            handle_link
         )
     )
 
@@ -276,11 +309,7 @@ def main():
     )
 
     logger.info(
-        "Telegram video downloader started!"
-    )
-
-    logger.info(
-        "YouTube Shorts are supported."
+        "Video downloader bot started!"
     )
 
     app.run_polling(
