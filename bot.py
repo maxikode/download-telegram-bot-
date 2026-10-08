@@ -52,6 +52,7 @@ class HealthHandler(BaseHTTPRequestHandler):
 
 
 def start_web_server():
+
     server = ThreadingHTTPServer(
         ("0.0.0.0", PORT),
         HealthHandler
@@ -69,6 +70,7 @@ async def start(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
+
     if update.message:
         await update.message.reply_text(
             START_TEXT
@@ -91,23 +93,29 @@ async def download_video(
     if not url.startswith(
         ("https://", "http://")
     ):
+
         await update.message.reply_text(
             "🔗 Отправь мне ссылку на видео."
         )
+
         return
+
 
     status = await update.message.reply_text(
         "⏳ Скачиваю видео...\n\n"
         "Пожалуйста, подожди."
     )
 
+
     try:
 
         with tempfile.TemporaryDirectory() as temp_dir:
 
             output_template = str(
-                Path(temp_dir) / "video.%(ext)s"
+                Path(temp_dir) /
+                "video.%(ext)s"
             )
+
 
             def download():
 
@@ -115,8 +123,6 @@ async def download_video(
 
                     "outtmpl": output_template,
 
-                    # Видео + аудио.
-                    # Подходит в том числе для YouTube Shorts.
                     "format": (
                         "bv*[height<=1080]+ba/"
                         "b[height<=1080]/"
@@ -139,7 +145,6 @@ async def download_video(
 
                     "concurrent_fragment_downloads": 4,
 
-                    # Актуальная поддержка YouTube.
                     "js_runtimes": {
                         "node": {}
                     },
@@ -149,12 +154,18 @@ async def download_video(
                     ],
                 }
 
-                with yt_dlp.YoutubeDL(options) as ydl:
+
+                with yt_dlp.YoutubeDL(
+                    options
+                ) as ydl:
+
                     ydl.download([url])
+
 
             await asyncio.to_thread(
                 download
             )
+
 
             files = [
                 path
@@ -162,10 +173,13 @@ async def download_video(
                 if path.is_file()
             ]
 
+
             if not files:
+
                 raise RuntimeError(
-                    "Видео не найдено"
+                    "yt-dlp не создал файл видео."
                 )
+
 
             mp4_files = [
                 path
@@ -173,12 +187,18 @@ async def download_video(
                 if path.suffix.lower() == ".mp4"
             ]
 
+
             if mp4_files:
+
                 video_path = mp4_files[0]
+
             else:
+
                 video_path = files[0]
 
+
             file_size = video_path.stat().st_size
+
 
             if file_size > 49 * 1024 * 1024:
 
@@ -189,10 +209,12 @@ async def download_video(
 
                 return
 
+
             await status.edit_text(
                 "📤 Видео скачано!\n"
                 "Отправляю..."
             )
+
 
             with video_path.open("rb") as video:
 
@@ -204,10 +226,15 @@ async def download_video(
                     connect_timeout=30,
                 )
 
+
         try:
+
             await status.delete()
+
         except Exception:
+
             pass
+
 
     except Exception as error:
 
@@ -216,15 +243,34 @@ async def download_video(
             error
         )
 
+
+        error_text = str(error)
+
+
+        if not error_text:
+
+            error_text = (
+                "Неизвестная ошибка."
+            )
+
+
+        if len(error_text) > 700:
+
+            error_text = (
+                error_text[:700]
+                + "..."
+            )
+
+
         try:
 
             await status.edit_text(
-                "❌ Не получилось скачать видео.\n\n"
-                "Проверь ссылку или попробуй другое "
-                "публичное видео."
+                "❌ Ошибка скачивания:\n\n"
+                f"{error_text}"
             )
 
         except Exception:
+
             pass
 
 
@@ -244,10 +290,11 @@ def main():
     if not TOKEN:
 
         raise RuntimeError(
-            "BOT_TOKEN не найден в Environment Variables Render."
+            "BOT_TOKEN не найден "
+            "в Environment Variables Render."
         )
 
-    # HTTP-сервер нужен Render.
+
     web_thread = threading.Thread(
         target=start_web_server,
         daemon=True
@@ -255,13 +302,14 @@ def main():
 
     web_thread.start()
 
-    # Telegram bot.
+
     app = (
         Application
         .builder()
         .token(TOKEN)
         .build()
     )
+
 
     app.add_handler(
         CommandHandler(
@@ -270,6 +318,7 @@ def main():
         )
     )
 
+
     app.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
@@ -277,13 +326,16 @@ def main():
         )
     )
 
+
     app.add_error_handler(
         error_handler
     )
 
+
     logger.info(
         "VIDEO DOWNLOADER BOT STARTED"
     )
+
 
     app.run_polling(
         drop_pending_updates=True
@@ -291,4 +343,5 @@ def main():
 
 
 if __name__ == "__main__":
+
     main()
