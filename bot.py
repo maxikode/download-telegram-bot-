@@ -5,7 +5,6 @@ import tempfile
 import threading
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
 
 import yt_dlp
 from telegram import Update
@@ -66,26 +65,6 @@ def start_web_server():
     server.serve_forever()
 
 
-def is_youtube_url(url: str) -> bool:
-    try:
-        hostname = urlparse(url).hostname
-
-        if not hostname:
-            return False
-
-        hostname = hostname.lower()
-
-        return (
-            hostname == "youtube.com"
-            or hostname.endswith(".youtube.com")
-            or hostname == "youtu.be"
-            or hostname.endswith(".youtu.be")
-        )
-
-    except Exception:
-        return False
-
-
 async def start(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
@@ -96,11 +75,32 @@ async def start(
         )
 
 
-async def download_other_video(
+async def download_video(
     update: Update,
-    url: str,
-    status
+    context: ContextTypes.DEFAULT_TYPE
 ):
+
+    if not update.message:
+        return
+
+    if not update.message.text:
+        return
+
+    url = update.message.text.strip()
+
+    if not url.startswith(
+        ("https://", "http://")
+    ):
+        await update.message.reply_text(
+            "🔗 Отправь мне ссылку на видео."
+        )
+        return
+
+    status = await update.message.reply_text(
+        "⏳ Скачиваю видео...\n\n"
+        "Пожалуйста, подожди."
+    )
+
     try:
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -112,8 +112,11 @@ async def download_other_video(
             def download():
 
                 options = {
+
                     "outtmpl": output_template,
 
+                    # Видео + аудио.
+                    # Подходит в том числе для YouTube Shorts.
                     "format": (
                         "bv*[height<=1080]+ba/"
                         "b[height<=1080]/"
@@ -135,6 +138,15 @@ async def download_other_video(
                     "fragment_retries": 3,
 
                     "concurrent_fragment_downloads": 4,
+
+                    # Актуальная поддержка YouTube.
+                    "js_runtimes": {
+                        "node": {}
+                    },
+
+                    "remote_components": [
+                        "ejs:github"
+                    ],
                 }
 
                 with yt_dlp.YoutubeDL(options) as ydl:
@@ -161,11 +173,10 @@ async def download_other_video(
                 if path.suffix.lower() == ".mp4"
             ]
 
-            video_path = (
-                mp4_files[0]
-                if mp4_files
-                else files[0]
-            )
+            if mp4_files:
+                video_path = mp4_files[0]
+            else:
+                video_path = files[0]
 
             file_size = video_path.stat().st_size
 
@@ -179,7 +190,8 @@ async def download_other_video(
                 return
 
             await status.edit_text(
-                "📤 Отправляю видео..."
+                "📤 Видео скачано!\n"
+                "Отправляю..."
             )
 
             with video_path.open("rb") as video:
@@ -200,70 +212,29 @@ async def download_other_video(
     except Exception as error:
 
         logger.exception(
-            "Ошибка скачивания: %s",
+            "DOWNLOAD ERROR: %s",
             error
         )
 
-        await status.edit_text(
-            "❌ Не получилось скачать это видео.\n\n"
-            "Проверь ссылку и попробуй ещё раз."
-        )
+        try:
 
+            await status.edit_text(
+                "❌ Не получилось скачать видео.\n\n"
+                "Проверь ссылку или попробуй другое "
+                "публичное видео."
+            )
 
-async def handle_link(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    if not update.message:
-        return
-
-    if not update.message.text:
-        return
-
-    url = update.message.text.strip()
-
-    if not url.startswith(
-        ("https://", "http://")
-    ):
-        await update.message.reply_text(
-            "🔗 Отправь ссылку на видео."
-        )
-        return
-
-    # Отдельная обработка YouTube.
-    if is_youtube_url(url):
-
-        await update.message.reply_text(
-            "▶️ Это ссылка YouTube.\n\n"
-            "Сейчас YouTube блокирует запросы "
-            "с серверов Render проверкой "
-            "«подтвердите, что вы не бот».\n\n"
-            "Поэтому я не буду запрашивать "
-            "твои личные cookies Google.\n\n"
-            "Попробуй пока ссылку на другой "
-            "поддерживаемый сервис."
-        )
-
-        return
-
-    status = await update.message.reply_text(
-        "⏳ Скачиваю видео..."
-    )
-
-    await download_other_video(
-        update,
-        url,
-        status
-    )
+        except Exception:
+            pass
 
 
 async def error_handler(
     update: object,
     context: ContextTypes.DEFAULT_TYPE
 ):
+
     logger.error(
-        "Ошибка Telegram-бота:",
+        "TELEGRAM ERROR:",
         exc_info=context.error
     )
 
@@ -276,6 +247,7 @@ def main():
             "BOT_TOKEN не найден в Environment Variables Render."
         )
 
+    # HTTP-сервер нужен Render.
     web_thread = threading.Thread(
         target=start_web_server,
         daemon=True
@@ -283,6 +255,7 @@ def main():
 
     web_thread.start()
 
+    # Telegram bot.
     app = (
         Application
         .builder()
@@ -300,7 +273,7 @@ def main():
     app.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
-            handle_link
+            download_video
         )
     )
 
@@ -309,7 +282,7 @@ def main():
     )
 
     logger.info(
-        "Video downloader bot started!"
+        "VIDEO DOWNLOADER BOT STARTED"
     )
 
     app.run_polling(
